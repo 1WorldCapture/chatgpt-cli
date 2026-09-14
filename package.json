@@ -1,0 +1,30 @@
+{
+  "name": "chatgpt-cdp-cli",
+  "version": "0.1.0",
+  "description": "Drive the ChatGPT web UI through Chrome DevTools Protocol (AdsPower SunBrowser) — pure page simulation, no backend API calls",
+  "type": "module",
+  "bin": {
+    "chatgpt-cdp-cli": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "bun run build:js && bun run build:bin",
+    "build:js": "bun build src/cli.ts src/index.ts --target=node --outdir=dist && chmod +x dist/cli.js",
+    "build:bin": "bun build --compile src/cli.ts --outfile=build/chatgpt-cdp-cli",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "prepack": "bun run build:js"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.11",
+    "typescript": "^5.9.2"
+  }
+}
