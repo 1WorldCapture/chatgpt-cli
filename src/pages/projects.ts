@@ -25,6 +25,16 @@ export async function listProjects(s: CdpSession) {
   })()`);
 }
 
+// The project page keeps loading after the composer is ready: the h1 briefly
+// shows the transient greeting hero ("Hey, ... Ready to dive in?") or nothing
+// at all. The settled project name mirrors into document.title ("ChatGPT -
+// <name>"), which the greeting never does.
+const PROJECT_HEADER_SETTLED = `(() => {
+  const h1 = document.querySelector('h1');
+  const name = (h1?.textContent || '').trim();
+  return name.length > 0 && document.title.endsWith(name);
+})()`;
+
 // Enter a project home page by display name (sidebar click) or by project id
 // (bare /g/<id> URL, which the app redirects to the full project URL).
 export async function enterProject(s: CdpSession, nameOrId: string) {
@@ -43,6 +53,12 @@ export async function enterProject(s: CdpSession, nameOrId: string) {
     if (!clicked) throw new Error(`project not found in sidebar: ${nameOrId}`);
     await poll(s, `/g-p-[0-9a-f]+/.test(location.pathname) && ${COMPOSER_READY}`);
   }
+  // Best effort: wait for the real project header so projectName is the
+  // project name, not the load-time greeting. On timeout fall back to
+  // whatever the DOM says (same output shape as before).
+  try {
+    await poll(s, PROJECT_HEADER_SETTLED, { timeoutMs: 10000 });
+  } catch { /* keep going with the current DOM */ }
   return s.eval(`({
     url: location.href,
     projectId: (location.pathname.match(/g-p-[0-9a-f]+/) || [])[0] || null,

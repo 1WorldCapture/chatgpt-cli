@@ -4,6 +4,12 @@
 // renders slightly AFTER the composer on fresh tabs (race), and lives inside
 // the composer form (fall back to <main>); it always carries aria-haspopup.
 //
+// INVARIANT: the popup only OPENS on a tab the browser reports visible — on
+// macOS visibility is a window property, and a fully occluded window leaves
+// every tab visibilityState "hidden" where the popup ignores clicks. Only
+// page-level Page.bringToFront restores it (it also raises the window);
+// browser-level Target.activateTarget does not.
+//
 // Synthesized el.click() opens the menu but it self-closes on focus loss, so
 // the popup must be driven with trusted CDP input events. Note: trusted ARROW
 // KEYS are not processed by this slider on background tabs — the only working
@@ -64,18 +70,14 @@ async function trustedKey(s: CdpSession, key: string, vk: number) {
   await s.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: vk });
 }
 
-// Bring this session's tab to the foreground (browser-level). Used only as a
-// last resort: some popups are unstable on background tabs.
+// Make this session's tab visible. Used only as a last resort: the popup
+// only opens on a tab the browser reports visible, and Page.bringToFront is
+// the only mechanism that restores visibility even when the OS window is
+// fully occluded (browser-level Target.activateTarget is not).
 async function activateTab(s: CdpSession) {
-  const m = s.wsUrl.match(/^ws:\/\/([^/]+)\/devtools\/page\/([0-9A-Fa-f]+)/);
-  if (!m) return;
   try {
-    const ver: any = await (await fetch(`http://${m[1]}/json/version`)).json();
-    const ws = new WebSocket(ver.webSocketDebuggerUrl);
-    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error('browser ws fail')); });
-    ws.send(JSON.stringify({ id: 1, method: 'Target.activateTarget', params: { targetId: m[2] } }));
-    await sleep(400);
-    ws.close();
+    await s.send('Page.bringToFront');
+    await sleep(250); // let visibilityState flip before the next trusted click
   } catch { /* best effort */ }
 }
 
@@ -113,8 +115,8 @@ export async function setEffort(s: CdpSession, effort: string): Promise<EffortRe
 
   // open the popup. On background tabs it can flash-close when no further
   // input follows the click, so: hold it open with an inert key press, poll
-  // fast, and as a last resort bring the tab to the foreground (popups are
-  // stable when the tab is active).
+  // fast, and as a last resort make the tab visible (the popup only opens on
+  // a tab the browser reports visible — see the module invariants).
   let geom: { now: number; min: number; max: number; thumb: number[]; track: number[] | null; visible: boolean } | null | undefined;
   for (let attempt = 0; attempt < 3 && !geom?.visible; attempt++) {
     const c = await s.eval(EFFORT_CHIP);

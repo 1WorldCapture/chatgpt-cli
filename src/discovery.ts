@@ -6,6 +6,7 @@
 
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { sleep } from './util';
 import type { SunBrowserInstance } from './types';
 
 // Extract the --user-data-dir of every MAIN SunBrowser process from `ps -axo
@@ -29,6 +30,29 @@ export function portFromDevToolsActivePort(content: string): string {
   return content.trim().split('\n')[0];
 }
 
+// GET <url> and parse JSON, retrying transient failures a few times. A single
+// hiccup against the CDP HTTP endpoints (observed on a live SunBrowser) must
+// not drop the whole instance from discovery. fetchImpl injectable for tests.
+export async function fetchJsonRetry(
+  url: string,
+  { attempts = 3, timeoutMs = 2000, retryDelayMs = 500, fetchImpl = fetch as typeof fetch }: {
+    attempts?: number;
+    timeoutMs?: number;
+    retryDelayMs?: number;
+    fetchImpl?: typeof fetch;
+  } = {},
+): Promise<any> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+      return await res.json();
+    } catch (e) { lastErr = e; }
+    if (i < attempts - 1) await sleep(retryDelayMs);
+  }
+  throw lastErr;
+}
+
 export async function discoverAdspowerCdp(): Promise<SunBrowserInstance[]> {
   let ps;
   try {
@@ -41,12 +65,10 @@ export async function discoverAdspowerCdp(): Promise<SunBrowserInstance[]> {
       port = portFromDevToolsActivePort(readFileSync(dir + '/DevToolsActivePort', 'utf8'));
     } catch { continue; }
     try {
-      const ver: any = await (await fetch(`http://127.0.0.1:${port}/json/version`,
-        { signal: AbortSignal.timeout(2000) })).json();
+      const ver: any = await fetchJsonRetry(`http://127.0.0.1:${port}/json/version`);
       let hasChatGptTab = false;
       try {
-        const tabs = (await (await fetch(`http://127.0.0.1:${port}/json/list`,
-          { signal: AbortSignal.timeout(2000) })).json()) as any[];
+        const tabs = (await fetchJsonRetry(`http://127.0.0.1:${port}/json/list`)) as any[];
         hasChatGptTab = tabs.some((t: any) => t.type === 'page' && /^https?:\/\/chatgpt\.com\//.test(t.url));
       } catch { /* list optional */ }
       found.push({ envId: dir.split('/').pop()!, port: Number(port), browser: ver.Browser, hasChatGptTab });

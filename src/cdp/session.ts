@@ -33,11 +33,14 @@ export class CdpSession {
   send(method: string, params?: object): Promise<any> {
     const id = ++this.id;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, resolve);
-      this.ws!.send(JSON.stringify({ id, method, params }));
-      setTimeout(() => {
+      // The timeout timer MUST be cleared on resolve: a leftover pending timer
+      // keeps the Node/Bun event loop alive for its full duration, adding a
+      // fixed ~15s hang to the end of every CLI command.
+      const timer = setTimeout(() => {
         if (this.pending.has(id)) { this.pending.delete(id); reject(new Error(method + ' timed out')); }
       }, 15000);
+      this.pending.set(id, (msg: any) => { clearTimeout(timer); resolve(msg); });
+      this.ws!.send(JSON.stringify({ id, method, params }));
     });
   }
 

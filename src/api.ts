@@ -77,15 +77,22 @@ async function waitForReply(s: CdpSession, beforeMark: any, timeoutMs: number): 
   return 'timeout';
 }
 
-// Core send flow on an attached tab: wait composer -> set reasoning effort ->
-// type -> wait send button appear+enabled -> click -> (new chats: capture the
-// materialized URL) -> wait for the reply to finish -> return url + latest round.
+// Core send flow on an attached tab: make the tab visible (ChatGPT throttles
+// streaming to a crawl on hidden tabs, defeating every completion signal) ->
+// wait composer -> set reasoning effort -> type -> wait send button
+// appear+enabled -> click -> (new chats: capture the materialized URL) ->
+// wait for the reply to finish -> return url + latest round.
 // extra-high/pro replies think + stream for minutes — default timeout is 5 min.
 async function sendInTab(
   s: CdpSession,
   text: string,
   { timeoutMs = 300000, isNewChat = false, effort = 'high', expect = null as string | null } = {},
 ): Promise<SendResult> {
+  // Hidden tabs postpone the streamed reply (no stop button, no markdown) for
+  // ~minutes, which reads as instant completion and returns an empty answer.
+  // Page.bringToFront makes the tab visible even when the OS window is fully
+  // occluded (browser-level Target.activateTarget does not).
+  try { await s.send('Page.bringToFront'); } catch { /* best effort */ }
   await poll(s, COMPOSER_READY, { timeoutMs: 20000 });
   if (expect) {
     // a deleted conversation silently redirects to a fresh chat — refuse to
