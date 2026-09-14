@@ -78,6 +78,11 @@ export async function getMessages(port: PortSpec = null, ref: string, rounds = 1
   const s = new CdpSession(page.webSocketDebuggerUrl!);
   await s.connect();
   try {
+    // Hidden tabs throttle rendering twice over: the streamed reply appears
+    // late (reading empty text) and the scroll-triggered loader of earlier
+    // turns never fires (truncated thread). Make the tab visible first —
+    // Page.bringToFront works even when the OS window is fully occluded.
+    try { await s.send('Page.bringToFront'); } catch { /* best effort */ }
     // wait for the conversation to render (a fresh tab loads from scratch)
     const deadline = Date.now() + 20000;
     while (Date.now() < deadline) {

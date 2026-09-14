@@ -4,6 +4,12 @@ var __require = /* @__PURE__ */ createRequire(import.meta.url);
 // src/discovery.ts
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+
+// src/util.ts
+var json = (v) => JSON.stringify(v);
+var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// src/discovery.ts
 function parseSunBrowserDataDirs(psOutput) {
   const dirs = new Set;
   for (const line of psOutput.split(`
@@ -19,6 +25,20 @@ function parseSunBrowserDataDirs(psOutput) {
 function portFromDevToolsActivePort(content) {
   return content.trim().split(`
 `)[0];
+}
+async function fetchJsonRetry(url, { attempts = 3, timeoutMs = 2000, retryDelayMs = 500, fetchImpl = fetch } = {}) {
+  let lastErr;
+  for (let i = 0;i < attempts; i++) {
+    try {
+      const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+      return await res.json();
+    } catch (e) {
+      lastErr = e;
+    }
+    if (i < attempts - 1)
+      await sleep(retryDelayMs);
+  }
+  throw lastErr;
 }
 async function discoverAdspowerCdp() {
   let ps;
@@ -36,10 +56,10 @@ async function discoverAdspowerCdp() {
       continue;
     }
     try {
-      const ver = await (await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(2000) })).json();
+      const ver = await fetchJsonRetry(`http://127.0.0.1:${port}/json/version`);
       let hasChatGptTab = false;
       try {
-        const tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(2000) })).json();
+        const tabs = await fetchJsonRetry(`http://127.0.0.1:${port}/json/list`);
         hasChatGptTab = tabs.some((t) => t.type === "page" && /^https?:\/\/chatgpt\.com\//.test(t.url));
       } catch {}
       found.push({ envId: dir.split("/").pop(), port: Number(port), browser: ver.Browser, hasChatGptTab });
@@ -92,14 +112,17 @@ class CdpSession {
   send(method, params) {
     const id = ++this.id;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, resolve);
-      this.ws.send(JSON.stringify({ id, method, params }));
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
           reject(new Error(method + " timed out"));
         }
       }, 15000);
+      this.pending.set(id, (msg) => {
+        clearTimeout(timer);
+        resolve(msg);
+      });
+      this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
   async eval(expression) {
@@ -144,10 +167,6 @@ async function connect(port = null) {
   await s.connect();
   return s;
 }
-// src/util.ts
-var json = (v) => JSON.stringify(v);
-var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 // src/pages/composer.ts
 var COMPOSER_READY = `(() => {
   const c = document.querySelector('#prompt-textarea');
@@ -204,6 +223,11 @@ async function listProjects(s) {
     });
   })()`);
 }
+var PROJECT_HEADER_SETTLED = `(() => {
+  const h1 = document.querySelector('h1');
+  const name = (h1?.textContent || '').trim();
+  return name.length > 0 && document.title.endsWith(name);
+})()`;
 async function enterProject(s, nameOrId) {
   if (/^g-p-[0-9a-f]+$/.test(nameOrId)) {
     await s.eval(`location.assign(${json("/g/" + nameOrId)}); 'navigating'`);
@@ -221,6 +245,9 @@ async function enterProject(s, nameOrId) {
       throw new Error(`project not found in sidebar: ${nameOrId}`);
     await poll(s, `/g-p-[0-9a-f]+/.test(location.pathname) && ${COMPOSER_READY}`);
   }
+  try {
+    await poll(s, PROJECT_HEADER_SETTLED, { timeoutMs: 1e4 });
+  } catch {}
   return s.eval(`({
     url: location.href,
     projectId: (location.pathname.match(/g-p-[0-9a-f]+/) || [])[0] || null,
@@ -362,13 +389,20 @@ async function createTab(port, url) {
       ws.onerror = () => rej(new Error("browser ws failed"));
     });
     const target = await new Promise((res, rej) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled)
+          rej(new Error("Target.createTarget timed out"));
+      }, 1e4);
       ws.onmessage = (ev) => {
         const m = JSON.parse(ev.data);
-        if (m.id === 1)
+        if (m.id === 1) {
+          settled = true;
+          clearTimeout(timer);
           m.error ? rej(new Error(m.error.message)) : res(m.result);
+        }
       };
       ws.send(JSON.stringify({ id: 1, method: "Target.createTarget", params: { url, background: true } }));
-      setTimeout(() => rej(new Error("Target.createTarget timed out")), 1e4);
     });
     ws.close();
     const deadline = Date.now() + 15000;
@@ -447,6 +481,9 @@ async function getMessages(port = null, ref, rounds = 1) {
   const s = new CdpSession(page.webSocketDebuggerUrl);
   await s.connect();
   try {
+    try {
+      await s.send("Page.bringToFront");
+    } catch {}
     const deadline = Date.now() + 20000;
     while (Date.now() < deadline) {
       if (await s.eval(`document.querySelectorAll('[data-testid^="conversation-turn-"]').length`) > 0)
@@ -511,19 +548,9 @@ async function trustedKey(s, key, vk) {
   await s.send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key, windowsVirtualKeyCode: vk });
 }
 async function activateTab(s) {
-  const m = s.wsUrl.match(/^ws:\/\/([^/]+)\/devtools\/page\/([0-9A-Fa-f]+)/);
-  if (!m)
-    return;
   try {
-    const ver = await (await fetch(`http://${m[1]}/json/version`)).json();
-    const ws = new WebSocket(ver.webSocketDebuggerUrl);
-    await new Promise((res, rej) => {
-      ws.onopen = res;
-      ws.onerror = () => rej(new Error("browser ws fail"));
-    });
-    ws.send(JSON.stringify({ id: 1, method: "Target.activateTarget", params: { targetId: m[2] } }));
-    await sleep(400);
-    ws.close();
+    await s.send("Page.bringToFront");
+    await sleep(250);
   } catch {}
 }
 async function trustedDrag(s, fromX, toX, y) {
@@ -624,6 +651,9 @@ async function waitForReply(s, beforeMark, timeoutMs) {
   return "timeout";
 }
 async function sendInTab(s, text, { timeoutMs = 300000, isNewChat = false, effort = "high", expect = null } = {}) {
+  try {
+    await s.send("Page.bringToFront");
+  } catch {}
   await poll(s, COMPOSER_READY, { timeoutMs: 20000 });
   if (expect) {
     try {

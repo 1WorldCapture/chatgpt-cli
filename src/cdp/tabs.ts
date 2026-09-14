@@ -37,12 +37,19 @@ export async function createTab(port: string | number, url: string): Promise<Cdp
       ws.onerror = () => rej(new Error('browser ws failed'));
     });
     const target = await new Promise<any>((res, rej) => {
+      // Clear the timeout on settle: a leftover timer keeps the event loop
+      // alive for its full 10s after the target was created.
+      let settled = false;
+      const timer = setTimeout(() => { if (!settled) rej(new Error('Target.createTarget timed out')); }, 10000);
       ws.onmessage = (ev) => {
         const m = JSON.parse(ev.data);
-        if (m.id === 1) m.error ? rej(new Error(m.error.message)) : res(m.result);
+        if (m.id === 1) {
+          settled = true;
+          clearTimeout(timer);
+          m.error ? rej(new Error(m.error.message)) : res(m.result);
+        }
       };
       ws.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url, background: true } }));
-      setTimeout(() => rej(new Error('Target.createTarget timed out')), 10000);
     });
     ws.close();
     const deadline = Date.now() + 15000;

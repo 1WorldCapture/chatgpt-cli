@@ -88,4 +88,13 @@ export async function cliMain(argv: string[] = process.argv.slice(2)): Promise<v
 const invokedAsMain = import.meta.main === true
   || (typeof process.argv[1] === 'string' && import.meta.url === pathToFileURL(process.argv[1]).href);
 
-if (invokedAsMain) await cliMain();
+if (invokedAsMain) {
+  try {
+    await cliMain();
+  } catch (e: any) {
+    // One clean line to stderr instead of a raw uncaught-exception dump, so
+    // the error output is identical across bun / node / compiled binary.
+    console.error('error: ' + (e?.message ?? e));
+    process.exit(1);
+  }
+}
